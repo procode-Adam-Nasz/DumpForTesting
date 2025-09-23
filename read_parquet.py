@@ -1,4 +1,5 @@
 import pyarrow.parquet as pq
+import pandas as pd
 
 # Path to your local Parquet file
 file_path = 'processed_data_part-00000.parquet'
@@ -6,6 +7,7 @@ file_path = 'processed_data_part-00000.parquet'
 try:
     # 1. Open the Parquet file
     parquet_file = pq.ParquetFile(file_path)
+    dataframe = pd.read_parquet(file_path)
 
     # 2. Inspect the high-level metadata
     print("--- File Metadata ---")

@@ -21,7 +21,7 @@ def process_and_upload_parquet(project_id, source_bucket_name, destination_bucke
     storage_client = storage.Client(project=project_id)
     source_bucket = storage_client.bucket(source_bucket_name)
     destination_bucket = storage_client.bucket(destination_bucket_name)
-    # blob = source_bucket.blob(blob_name_test)
+    # blob = source_bucket.get_blob(blob_name_test)
     # blob_size = blob.size
     # the commented out code apparently sets blob size to None:
     # < Blob: geo_dump_oracledb, test.csv, None >
@@ -45,28 +45,58 @@ def process_and_upload_parquet(project_id, source_bucket_name, destination_bucke
         end_byte = min(start_byte + chunk_size - 1, blob_size - 1)
         range_str = f"bytes={start_byte}-{end_byte}"
         chunk_data = blob.download_as_bytes(start=start_byte, end=end_byte)
-        try:
-            csv_chunk_str = chunk_data.decode('utf-8')
-            # df_chunk = pd.read_csv(pd.compat.StringIO(csv_chunk_str), sep=',')  # Adjust separator if needed
-            # StringIO didn't work for me becasue apparently its not present in recent pandas so I used normal io library
 
-            df_chunk = pd.read_csv(io.StringIO(csv_chunk_str), sep=',')
+        try:
+            # variable to load dictionaries in
+            chunk_data_list = []
+            power_events_list = []
+            csv_chunk_str = chunk_data.decode('utf-8')
+
+            df_chunk = pd.read_csv(io.StringIO(csv_chunk_str), sep=',', header=None)
             # Process nested JSON (same as before)
             for index, row in df_chunk.iterrows():
-                if 'json_column' in row:
-                    try:
-                        nested_data = json.loads(row['json_column'])
-                        df_chunk.loc[index, 'nested_field1'] = nested_data.get('field1', None)
-                        # ... other fields
-                    except json.JSONDecodeError as e:
-                        print(f"JSON Error: {e}, Row: {row}")
+                try:
+                    # Parse the JSON string
+                    parsed_data = json.loads(row[1])
+                    # Make array_index
+                    array_index = list(range(0, len(parsed_data.get("attributes", {}).get("activePowerElec"))))
+                    # Create timestamps for each event
+                    individual_utc = []
+                    for my_i in array_index:
+                        individual_utc.append(parsed_data.get("utc") + (my_i*10))
+
+                    # Extract required fields
+                    result = {
+                        "id": parsed_data.get("id"),
+                        "resource": parsed_data.get("resource"),
+                        "original_utc": parsed_data.get("utc"),
+                        "array_index": array_index,
+                        "activePowerElec": parsed_data.get("attributes", {}).get("activePowerElec"),
+                        "individual_utc": individual_utc
+                    }
+                    data_indentifiers = {
+                        "hub_id": parsed_data.get("id"),
+                        "resource": parsed_data.get("resource"),
+                        "original_utc": parsed_data.get("utc")
+                    }
+                    power_events = {
+                        "array_index": array_index,
+                        "activePowerElec": parsed_data.get("attributes", {}).get("activePowerElec"),
+                        "individual_utc": individual_utc
+                    }
+                    chunk_data_list.append(result)
+                    df_power_events = pd.DataFrame(power_events)
+                    for key, value in data_indentifiers.items():
+                        df_power_events[key] = value
+                    power_events_list.append(df_power_events)
+
+                except:
+                    print("haha")
 
             # Convert to Parquet
-            table = pa.Table.from_pandas(df_chunk)
-            # I had to change code here because I was getting "write_table() missing 1 positional argument" error.
-            # This was done with AI help so please make sure it's correctly adjusted and actually applicable to this use!
-            # previous write_table didn't have the parquet_buffer destination set so it didn't save it out if I understand correctly
-            #
+            df_joined_power = pd.concat(power_events_list)
+            table = pd.DataFrame(chunk_data_list)
+
             parquet_buffer = io.BytesIO()
             pq.write_table(table, where=parquet_buffer, compression='snappy')  # snappy compression
             parquet_buffer.seek(0) # Go to the beginning of the buffer before uploading
