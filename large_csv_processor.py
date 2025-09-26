@@ -98,7 +98,8 @@ def process_and_upload_parquet(project_id, source_bucket_name, destination_bucke
             table = pd.DataFrame(chunk_data_list)
 
             parquet_buffer = io.BytesIO()
-            pq.write_table(table, where=parquet_buffer, compression='snappy')  # snappy compression
+            #pq.write_table(df_joined_power, where=parquet_buffer, compression='snappy')  # snappy compression
+            df_joined_power.to_parquet(parquet_buffer, engine='pyarrow', compression='snappy')
             parquet_buffer.seek(0) # Go to the beginning of the buffer before uploading
 
             # Upload Parquet chunk to destination bucket
