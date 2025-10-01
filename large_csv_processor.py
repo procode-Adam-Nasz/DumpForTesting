@@ -5,6 +5,7 @@ import os
 import pyarrow as pa
 import pyarrow.parquet as pq
 import io
+import re
 
 # Replace with your project and bucket information
 project_id = 'ad-dev-0800e668e8218823f35e'
@@ -12,8 +13,8 @@ project_id = 'ad-dev-0800e668e8218823f35e'
 source_bucket_name = 'geo_dump_oracledb'
 destination_bucket_name = 'geo_processed_month'
 # got rid of unnecessary code assigning blob_name which was the overwritten (line 13)
-blob_name = "objectstorage.uk-london-1.oraclecloud.com/p/Q6qHiynHIba5KfVQ6lqr-kZO-G3BXlBnZRTH_ntTl4IOMurhzf7I2pwc1SxQONwL/n/lrqxlmmrxdgw/b/GEO/o/test.csv"
-blob_name_test = "test.csv"
+blob_name = "objectstorage.uk-london-1.oraclecloud.com/p/Q6qHiynHIba5KfVQ6lqr-kZO-G3BXlBnZRTH_ntTl4IOMurhzf7I2pwc1SxQONwL/n/lrqxlmmrxdgw/b/GEO/o/outputfull.csv"
+#blob_name_test = "test.csv"
 chunk_size = 1024 * 1024 * 512  # 512MB chunks (adjust as needed)
 
 
@@ -27,37 +28,49 @@ def process_and_upload_parquet(project_id, source_bucket_name, destination_bucke
     # < Blob: geo_dump_oracledb, test.csv, None >
     # but using get_blob you do get the size - https://cloud.google.com/python/docs/reference/storage/2.0.0/buckets
 
-    blob = source_bucket.get_blob(blob_name_test)
+    blob = source_bucket.get_blob(blob_name)
     # check for blob just in case
     if not blob:
-        print(f"Error: Blob '{blob_name_test}' not found in bucket '{source_bucket_name}'.")
+        print(f"Error: Blob '{blob_name}' not found in bucket '{source_bucket_name}'.")
         return
     blob_size = blob.size
-
-    myBlobs = source_bucket.list_blobs()
-    blob_list = []
-    for bb in myBlobs:
-        d = source_bucket.blob(bb.name)
-        blob_list.append(d)
-        print(bb.name)
+    leftover_data = b''
 
     for start_byte in range(0, blob_size, chunk_size):
         end_byte = min(start_byte + chunk_size - 1, blob_size - 1)
         range_str = f"bytes={start_byte}-{end_byte}"
         chunk_data = blob.download_as_bytes(start=start_byte, end=end_byte)
+        # Combine leftover and new
+        chunk_data = leftover_data + chunk_data
+        # Find the last newline character in this combined chunk
+        #last_newline_pos = chunk_data.rfind(b',Y,')
+        last_newline_pos = chunk_data.rfind(b'\n')
+        if last_newline_pos != -1:
+            # Split the chunk into complete rows and leftover
+            complete_data = chunk_data[:last_newline_pos + 1]  # Include up to the newline
+            leftover_data = chunk_data[last_newline_pos + 1:]  # Anything after the newline
+        else:
+            # If no newline is found, keep all data in leftover
+            complete_data = b''
+            leftover_data = chunk_data
+
 
         try:
             # variable to load dictionaries in
             chunk_data_list = []
             power_events_list = []
-            csv_chunk_str = chunk_data.decode('utf-8')
+            csv_chunk_str = complete_data.decode('utf-8')
 
-            df_chunk = pd.read_csv(io.StringIO(csv_chunk_str), sep=',', header=None)
+
+            df_chunk = pd.read_csv(io.StringIO(csv_chunk_str), sep=',Y,', header=None)
+            pattern = r'^\d{2}-[A-Z]{3}-\d{2},'
+            #pd.read_csv(io.StringIO(chunk_data[:last_newline_pos + 3].decode('utf-8')), sep=',Y,', header=None)
             # Process nested JSON (same as before)
             for index, row in df_chunk.iterrows():
                 try:
+                    separated_json = re.sub(pattern, '', row[0])
                     # Parse the JSON string
-                    parsed_data = json.loads(row[1])
+                    parsed_data = json.loads(separated_json)
                     # Make array_index
                     array_index = list(range(0, len(parsed_data.get("attributes", {}).get("activePowerElec"))))
                     # Create timestamps for each event
@@ -90,8 +103,11 @@ def process_and_upload_parquet(project_id, source_bucket_name, destination_bucke
                         df_power_events[key] = value
                     power_events_list.append(df_power_events)
 
-                except:
-                    print("haha")
+                except Exception as e:
+                    #print(f"Error processing JSON in row {index + 1}: {e}")
+                    #print("haha", e)
+                    #print("row", row)
+                    e
 
             # Convert to Parquet
             df_joined_power = pd.concat(power_events_list)
@@ -115,6 +131,7 @@ def process_and_upload_parquet(project_id, source_bucket_name, destination_bucke
 
         except (pd.errors.ParserError, UnicodeDecodeError) as e:
             print(f"Processing Error: {e}, Range: {range_str}")
+            print(f"Chunk Data: {chunk_data}")
 
 
 process_and_upload_parquet(project_id, source_bucket_name, destination_bucket_name, blob_name, chunk_size)
